@@ -6,7 +6,6 @@ source_files = {'.py', '.cpp', '.h'}
 
 DECLARATIONS_PATH = 'torch/share/ATen/Declarations.yaml'
 
-
 # TODO: This is a little inaccurate, because it will also pick
 # up setup_helper scripts which don't affect code generation
 def all_generator_source():
@@ -25,16 +24,13 @@ def generate_code(ninja_global=None,
                   install_dir=None,
                   subset=None,
                   disable_autograd=False,
-                  selected_op_list_path=None,
-                  selected_op_list=None,
-                  force_schema_registration=False):
-    # cwrap depends on pyyaml, so we can't import it earlier
-    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    sys.path.insert(0, root)
+                  force_schema_registration=False,
+                  operator_selector=None):
     from tools.autograd.gen_autograd import gen_autograd, gen_autograd_python
     from tools.autograd.gen_annotated_fn_args import gen_annotated
-    from tools.autograd.utils import load_op_list_and_strip_overload
     from tools.jit.gen_unboxing_wrappers import gen_unboxing_wrappers
+    from tools.codegen.selective_build.selector import SelectiveBuilder
+
 
     # Build ATen based Variable classes
     if install_dir is None:
@@ -55,22 +51,24 @@ def generate_code(ninja_global=None,
     if subset == "pybindings" or not subset:
         gen_autograd_python(declarations_path or DECLARATIONS_PATH, autograd_gen_dir, autograd_dir)
 
+    if operator_selector is None:
+        operator_selector = SelectiveBuilder.get_nop_selector()
+
     if subset == "libtorch" or not subset:
-        selected_op_list = load_op_list_and_strip_overload(selected_op_list, selected_op_list_path)
 
         gen_autograd(
             declarations_path or DECLARATIONS_PATH,
             autograd_gen_dir,
             autograd_dir,
             disable_autograd=disable_autograd,
-            selected_op_list=selected_op_list,
+            operator_selector=operator_selector,
         )
         gen_unboxing_wrappers(
             declarations_path or DECLARATIONS_PATH,
             jit_gen_dir,
             tools_jit_templates,
             disable_autograd=disable_autograd,
-            selected_op_list=selected_op_list,
+            operator_selector=operator_selector,
             force_schema_registration=force_schema_registration)
 
     if subset == "python" or not subset:
@@ -78,6 +76,35 @@ def generate_code(ninja_global=None,
             declarations_path or DECLARATIONS_PATH,
             python_install_dir,
             autograd_dir)
+
+def get_selector(selected_op_list, selected_op_list_path):
+    # cwrap depends on pyyaml, so we can't import it earlier
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, root)
+    from tools.autograd.utils import load_op_list_and_strip_overload
+    from tools.codegen.selective_build.selector import SelectiveBuilder
+
+    selected_op_list = load_op_list_and_strip_overload(
+        selected_op_list,
+        selected_op_list_path,
+    )
+
+    is_root_operator = False
+    is_used_for_training = False
+
+    if selected_op_list_path is not None:
+        is_root_operator = "root_op_list.yaml" in selected_op_list_path
+        is_used_for_training = "combined_op_list.yaml" in selected_op_list_path
+
+    selector: SelectiveBuilder = SelectiveBuilder.get_nop_selector()
+    if selected_op_list is not None:
+        selector = SelectiveBuilder.from_legacy_op_registration_allow_list(
+            selected_op_list,
+            is_root_operator,
+            is_used_for_training,
+        )
+
+    return selector
 
 
 def main():
@@ -114,6 +141,7 @@ def main():
         'listed on --selected-op-list'
     )
     options = parser.parse_args()
+
     generate_code(
         options.ninja_global,
         options.declarations_path,
@@ -121,9 +149,8 @@ def main():
         options.install_dir,
         options.subset,
         options.disable_autograd,
-        options.selected_op_list_path,
-        options.selected_op_list,
         options.force_schema_registration,
+        operator_selector=get_selector(options.selected_op_list, options.selected_op_list_path),
     )
 
 
